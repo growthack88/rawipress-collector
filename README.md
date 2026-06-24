@@ -4,6 +4,26 @@ Continuously collect, normalize, deduplicate, and store official Saudi
 information sources. This is **Phase 1**: reliable collection + storage.
 No AI, embeddings, or vector DBs yet — by design.
 
+## Quick start (any Mac — clone & run)
+
+```bash
+cd ~/Documents
+git clone https://github.com/growthack88/rawipress-collector.git RawiPress
+cd RawiPress
+
+python3 -m venv .venv                 # create a virtual environment
+source .venv/bin/activate             # activate it
+pip install -r requirements.txt       # install deps
+
+python app.py collect                 # collect from all enabled sources
+python app.py status                  # see what was stored
+```
+
+Collected articles land in `data/raw_articles.json`; logs in `logs/collector.log`.
+
+> Run from **inside Saudi Arabia** for best results — many Saudi gov/finance
+> feeds geo-restrict or serve different content outside KSA.
+
 ## Design
 
 Config-driven, not one-file-per-source. You add a source by adding an
