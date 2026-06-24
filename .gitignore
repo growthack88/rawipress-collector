@@ -1,0 +1,8 @@
+# runtime data & logs (machine-local, can be large)
+data/
+logs/
+projects/venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store

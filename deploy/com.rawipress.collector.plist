@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job: run the Rawi Press collector every 15 minutes.
+
+  Install on the Saudi node:
+    1. Edit the absolute paths below if your username/home differs
+       (default assumes /Users/graphics-2/Documents/RawiPress).
+    2. cp deploy/com.rawipress.collector.plist ~/Library/LaunchAgents/
+    3. launchctl load   ~/Library/LaunchAgents/com.rawipress.collector.plist
+    4. launchctl start  com.rawipress.collector     # run once now to test
+  Manage:
+    launchctl list | grep rawipress
+    launchctl unload ~/Library/LaunchAgents/com.rawipress.collector.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rawipress.collector</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/graphics-2/Documents/RawiPress/deploy/run_collect.sh</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/graphics-2/Documents/RawiPress</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/graphics-2/Documents/RawiPress/logs/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/graphics-2/Documents/RawiPress/logs/launchd.err.log</string>
+</dict>
+</plist>
