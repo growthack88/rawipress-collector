@@ -1,17 +1,12 @@
-"""Generic HTML list-page scraper — for sources with neither RSS nor sitemap.
+"""Generic HTML list-page scraper — last-resort tier (most fragile).
 
-Config-driven CSS selectors so a new HTML source is a JSON edit, not new code.
-HTML scraping is the most fragile method (markup changes break it), so it's
-the last-resort tier per the collection strategy.
+Config-driven CSS selectors so a new HTML source is a JSON edit. Use the
+special selector value "self" when the matched item element IS the link
+(e.g. item_selector picks <a> tags directly).
 
-Config (sources.json):
-  collection_method: "html"
-  list_url:        "<page listing articles>"
-  item_selector:   "article.card"        # each article container
-  title_selector:  "h2 a"                 # within item; text + href
-  link_selector:   "h2 a"                 # within item; href (defaults to title_selector)
-  summary_selector:".excerpt"             # optional
-  base_url:        "https://example.com"  # to resolve relative links (defaults to source_url)
+Config:
+  collection_method: "html"   (or html_fallback block on an rss source)
+  list_url, item_selector, title_selector, link_selector?, summary_selector?, base_url?
 """
 from __future__ import annotations
 
@@ -20,6 +15,10 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from collectors.base import BaseCollector
+
+
+def _pick(node, selector):
+    return node if selector == "self" else node.select_one(selector)
 
 
 class HTMLCollector(BaseCollector):
@@ -42,28 +41,33 @@ class HTMLCollector(BaseCollector):
             return []
 
         soup = BeautifulSoup(resp.text, "lxml")
-        items: list[dict] = []
+        items, seen = [], set()
         for node in soup.select(item_sel):
-            title_el = node.select_one(title_sel)
-            link_el = node.select_one(link_sel)
+            title_el = _pick(node, title_sel)
+            link_el = _pick(node, link_sel)
             if not title_el:
                 continue
             href = (link_el.get("href") if link_el else "") or ""
+            if not href:
+                continue
+            url = urljoin(base_url, href)
+            if url in seen:
+                continue
+            seen.add(url)
             summary = ""
             if summary_sel:
                 sum_el = node.select_one(summary_sel)
                 summary = sum_el.get_text(strip=True) if sum_el else ""
-            items.append(
-                {
-                    "source": self.name,
-                    "title": title_el.get_text(strip=True),
-                    "url": urljoin(base_url, href),
-                    "published_at": "",
-                    "content": "",
-                    "summary": summary,
-                    "tags": [],
-                }
-            )
+            items.append({
+                "source": self.name,
+                "title": title_el.get_text(strip=True),
+                "url": url,
+                "published_at": "",
+                "content": "",
+                "summary": summary,
+                "tags": [],
+                "author": "",
+            })
 
         self.log.info("scraped %d items", len(items))
         return items

@@ -1,5 +1,5 @@
 {
-  "_comment": "Rawi Press source registry. Add a source by adding an object here — no code change needed. collection_method drives which engine runs. priority: 1 (highest) .. 5 (lowest). crawl_frequency is advisory (minutes) for future per-source scheduling; the launchd job currently runs every source on each tick.",
+  "_comment": "Rawi Press source registry v2. Add a source = add an object here (no code). collection_method drives the engine: rss | sitemap | html. Sitemap sources now fetch each article and extract full content. Feeds marked verified:false were guessed from outside KSA — run from the Saudi node, then tune URLs/filters against logs.",
   "sources": [
     {
       "name": "arabnews",
@@ -8,19 +8,35 @@
       "source_url": "https://www.arabnews.com",
       "collection_method": "rss",
       "rss_url": "https://www.arabnews.com/rss.xml",
-      "crawl_frequency": 15,
+      "rss_fallbacks": ["https://www.arabnews.com/cat/1/rss.xml"],
       "priority": 1,
       "enabled": true,
       "verified": true
+    },
+    {
+      "name": "spa",
+      "display_name": "Saudi Press Agency",
+      "category": "government",
+      "source_url": "https://www.spa.gov.sa",
+      "collection_method": "sitemap",
+      "sitemap_url": "https://www.spa.gov.sa/sitemap.xml",
+      "sitemap_url_regex": "\\d{6,}",
+      "sitemap_max_urls": 25,
+      "extract_content": true,
+      "priority": 1,
+      "enabled": true,
+      "verified": false
     },
     {
       "name": "saudigazette",
       "display_name": "Saudi Gazette",
       "category": "media",
       "source_url": "https://saudigazette.com.sa",
-      "collection_method": "rss",
-      "rss_url": "https://saudigazette.com.sa/rssfeed/74",
-      "crawl_frequency": 15,
+      "collection_method": "sitemap",
+      "sitemap_url": "https://saudigazette.com.sa/sitemap.xml",
+      "sitemap_url_contains": "/article",
+      "sitemap_max_urls": 25,
+      "extract_content": true,
       "priority": 2,
       "enabled": true,
       "verified": false
@@ -30,9 +46,11 @@
       "display_name": "Asharq Al-Awsat (English)",
       "category": "media",
       "source_url": "https://english.aawsat.com",
-      "collection_method": "rss",
-      "rss_url": "https://english.aawsat.com/home/rss.xml",
-      "crawl_frequency": 30,
+      "collection_method": "sitemap",
+      "sitemap_url": "https://english.aawsat.com/sitemap.xml",
+      "sitemap_url_regex": "\\d{5,}",
+      "sitemap_max_urls": 25,
+      "extract_content": true,
       "priority": 3,
       "enabled": true,
       "verified": false
@@ -43,21 +61,15 @@
       "category": "financial",
       "source_url": "https://www.argaam.com",
       "collection_method": "rss",
-      "rss_url": "https://www.argaam.com/en/rss",
-      "crawl_frequency": 15,
+      "rss_url": "https://www.argaam.com/ar/rss",
+      "rss_fallbacks": ["https://www.argaam.com/en/rss"],
+      "html_fallback": {
+        "list_url": "https://www.argaam.com/ar/articles/latest",
+        "item_selector": "article, .article-list li, .title-news",
+        "title_selector": "a",
+        "summary_selector": "p"
+      },
       "priority": 2,
-      "enabled": true,
-      "verified": false
-    },
-    {
-      "name": "spa",
-      "display_name": "Saudi Press Agency",
-      "category": "government",
-      "source_url": "https://www.spa.gov.sa",
-      "collection_method": "sitemap",
-      "sitemap_url": "https://www.spa.gov.sa/sitemap.xml",
-      "crawl_frequency": 15,
-      "priority": 1,
       "enabled": true,
       "verified": false
     },
@@ -68,7 +80,12 @@
       "source_url": "https://sabq.org",
       "collection_method": "rss",
       "rss_url": "https://sabq.org/rss",
-      "crawl_frequency": 15,
+      "rss_fallbacks": ["https://sabq.org/feed", "https://sabq.org/rss.xml"],
+      "html_fallback": {
+        "list_url": "https://sabq.org",
+        "item_selector": "article a, .post-title a, h2 a, h3 a",
+        "title_selector": "self"
+      },
       "priority": 2,
       "enabled": true,
       "verified": false

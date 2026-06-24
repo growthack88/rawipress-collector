@@ -1,21 +1,24 @@
-"""Generic sitemap collector — for sources that publish a sitemap.xml but
-no usable RSS (common for Saudi gov portals like SPA).
+"""Sitemap collector with full-article extraction (Phase 1 fix).
 
-Walks the sitemap (following <sitemapindex> one level into child sitemaps),
-emits URL entries with <lastmod> as published_at. Title/content are left
-empty here; a Phase-2 enrichment step can fetch each URL for full text.
+Before: stored bare URLs (empty title/content). Now: walks the sitemap,
+filters to real article URLs, then fetches each and extracts title +
+content + date + author via collectors.article.extract_article.
 
 Config (sources.json):
   collection_method: "sitemap"
-  sitemap_url: "<sitemap url>"
-  sitemap_max_urls: 200          # optional cap per run (default 200)
-  sitemap_url_contains: "/news"  # optional substring filter
+  sitemap_url: "<sitemap or sitemap-index url>"
+  sitemap_url_contains: "/news"     # optional substring filter (recommended)
+  sitemap_url_regex: "\\d{6,}"       # optional regex an article URL must match
+  sitemap_max_urls: 30               # candidate URLs scanned per run
+  extract_content: true              # default true; set false to store URLs only
 """
 from __future__ import annotations
 
+import re
 from xml.etree import ElementTree as ET
 
 from collectors.base import BaseCollector
+from collectors.article import extract_article
 
 _NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 
@@ -24,7 +27,6 @@ class SitemapCollector(BaseCollector):
     def _parse_sitemap(self, xml_bytes: bytes):
         root = ET.fromstring(xml_bytes)
         tag = root.tag.lower()
-        # Either a <sitemapindex> (links to more sitemaps) or a <urlset>.
         if tag.endswith("sitemapindex"):
             return "index", [
                 loc.text.strip()
@@ -36,10 +38,34 @@ class SitemapCollector(BaseCollector):
             loc = url_el.find("sm:loc", _NS)
             lastmod = url_el.find("sm:lastmod", _NS)
             if loc is not None and loc.text:
-                urls.append(
-                    {"url": loc.text.strip(), "lastmod": lastmod.text.strip() if lastmod is not None and lastmod.text else ""}
-                )
+                urls.append({
+                    "url": loc.text.strip(),
+                    "lastmod": lastmod.text.strip() if lastmod is not None and lastmod.text else "",
+                })
         return "urlset", urls
+
+    def _gather_urls(self, sitemap_url: str, max_urls: int) -> list[dict]:
+        try:
+            resp = self.fetch(sitemap_url)
+            kind, payload = self._parse_sitemap(resp.content)
+        except Exception as exc:
+            self.log.error("sitemap fetch/parse failed %s: %s", sitemap_url, exc)
+            return []
+        if kind == "urlset":
+            return payload
+        # index -> walk children until we have enough candidates
+        out: list[dict] = []
+        for child in payload:
+            if len(out) >= max_urls * 3:
+                break
+            try:
+                cresp = self.fetch(child)
+                ckind, curls = self._parse_sitemap(cresp.content)
+                if ckind == "urlset":
+                    out.extend(curls)
+            except Exception as exc:
+                self.log.warning("child sitemap failed %s: %s", child, exc)
+        return out
 
     def collect(self) -> list[dict]:
         sitemap_url = self.source.get("sitemap_url")
@@ -47,47 +73,39 @@ class SitemapCollector(BaseCollector):
             self.log.error("no sitemap_url configured")
             return []
 
-        max_urls = int(self.source.get("sitemap_max_urls", 200))
+        max_urls = int(self.source.get("sitemap_max_urls", 30))
         contains = self.source.get("sitemap_url_contains", "")
+        regex = self.source.get("sitemap_url_regex", "")
+        pattern = re.compile(regex) if regex else None
+        do_extract = self.source.get("extract_content", True)
 
-        try:
-            resp = self.fetch(sitemap_url)
-            kind, payload = self._parse_sitemap(resp.content)
-        except Exception as exc:
-            self.log.error("sitemap fetch/parse failed: %s", exc)
-            return []
-
-        url_entries: list[dict] = []
-        if kind == "index":
-            # Follow child sitemaps until we hit the cap.
-            for child in payload:
-                if len(url_entries) >= max_urls:
-                    break
-                try:
-                    child_resp = self.fetch(child)
-                    ckind, curls = self._parse_sitemap(child_resp.content)
-                    if ckind == "urlset":
-                        url_entries.extend(curls)
-                except Exception as exc:
-                    self.log.warning("child sitemap failed %s: %s", child, exc)
-        else:
-            url_entries = payload
-
+        candidates = self._gather_urls(sitemap_url, max_urls)
         if contains:
-            url_entries = [u for u in url_entries if contains in u["url"]]
-        url_entries = url_entries[:max_urls]
+            candidates = [u for u in candidates if contains in u["url"]]
+        if pattern:
+            candidates = [u for u in candidates if pattern.search(u["url"])]
 
-        items = [
-            {
-                "source": self.name,
-                "title": "",  # enriched in a later phase
-                "url": u["url"],
-                "published_at": u.get("lastmod", ""),
-                "content": "",
-                "summary": "",
-                "tags": [],
+        # Most-recently-modified first, then cap.
+        candidates.sort(key=lambda u: u.get("lastmod", ""), reverse=True)
+        candidates = candidates[:max_urls]
+
+        items: list[dict] = []
+        for u in candidates:
+            base = {
+                "source": self.name, "url": u["url"], "published_at": u.get("lastmod", ""),
+                "title": "", "content": "", "summary": "", "tags": [], "author": "",
             }
-            for u in url_entries
-        ]
-        self.log.info("collected %d sitemap urls", len(items))
+            if do_extract:
+                try:
+                    art = extract_article(u["url"])
+                    base["title"] = art["title"]
+                    base["content"] = art["content"]
+                    base["author"] = art["author"]
+                    base["published_at"] = art["published_at"] or base["published_at"]
+                except Exception as exc:
+                    self.log.warning("extract failed %s: %s", u["url"], exc)
+                    continue  # skip URL-only records; we want content
+            items.append(base)
+
+        self.log.info("collected %d articles from sitemap", len(items))
         return items

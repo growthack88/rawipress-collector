@@ -1,8 +1,18 @@
 # runtime data & logs (machine-local, can be large)
 data/
 logs/
-projects/venv/
+
+# virtual environments
+.venv/
 venv/
+projects/venv/
+env/
+
+# python
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+
+# os
 .DS_Store

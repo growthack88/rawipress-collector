@@ -101,5 +101,6 @@ def normalize(raw: dict, source: dict) -> dict:
         "content": clean_text(raw.get("content", "")),
         "summary": clean_text(raw.get("summary", "")),
         "tags": raw.get("tags", []) or [],
+        "author": clean_text(raw.get("author", "")),
         "collected_at": now_iso(),
     }

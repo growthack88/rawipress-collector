@@ -1,143 +1,129 @@
-# Rawi Press — Saudi Intelligence Collection Engine
+# Rawi Press v2 — Saudi News Intelligence Platform
 
-Continuously collect, normalize, deduplicate, and store official Saudi
-information sources. This is **Phase 1**: reliable collection + storage.
-No AI, embeddings, or vector DBs yet — by design.
+From a simple RSS collector to a collection → enrichment → storage → dashboard →
+API platform for official Saudi sources. Pure-Python intelligence layer (no ML
+deps, no API keys) so the in-KSA node stays self-contained.
 
-## Quick start (any Mac — clone & run)
+```
+collect ─▶ normalize ─▶ enrich (AI-lite) ─▶ SQLite ─▶ Dashboard + REST API
+ RSS/Sitemap/HTML       lang·summary·keywords        WAL    FastAPI + Jinja
+ (full article text)    entities·topic·sentiment             dark "Bloomberg" UI
+                        importance score
+```
+
+## Quick start
 
 ```bash
 cd ~/Documents
-git clone https://github.com/growthack88/rawipress-collector.git RawiPress
-cd RawiPress
+git clone https://github.com/growthack88/rawipress-collector.git RawiPress && cd RawiPress
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-python3 -m venv .venv                 # create a virtual environment
-source .venv/bin/activate             # activate it
-pip install -r requirements.txt       # install deps
-
-python app.py collect                 # collect from all enabled sources
-python app.py status                  # see what was stored
+python app.py collect          # collect + enrich + store
+python app.py serve            # dashboard at http://127.0.0.1:8787
 ```
 
-Collected articles land in `data/raw_articles.json`; logs in `logs/collector.log`.
+> On the Saudi node, the existing `projects/venv` already has the collection
+> deps — just `pip install fastapi uvicorn jinja2 python-dateutil` into it,
+> or use a fresh `.venv` as above. Run from **inside KSA** — feeds geo-block.
 
-> Run from **inside Saudi Arabia** for best results — many Saudi gov/finance
-> feeds geo-restrict or serve different content outside KSA.
+## CLI
 
-## Design
+```bash
+python app.py collect              # all enabled sources
+python app.py source spa           # one source
+python app.py status               # storage + per-source health
+python app.py list                 # configured sources
+python app.py serve [host] [port]  # dashboard + API (default 127.0.0.1:8787)
+python app.py schedule [minutes]   # foreground auto-collector (default 15)
+python app.py initdb               # create schema
+python app.py migrate [path]       # import legacy raw_articles.json
+```
 
-Config-driven, not one-file-per-source. You add a source by adding an
-object to `config/sources.json`; the engine picks the right collector by
-`collection_method`. Adding source #7…#100 is a JSON edit, not new code.
+## Architecture
 
 ```
 RawiPress/
-├── app.py                 # CLI entrypoint + collection engine
-├── config/sources.json    # source registry (the only file you edit to add sources)
-├── collectors/
-│   ├── base.py            # BaseCollector: fetch() + collect() contract
-│   ├── rss.py             # generic RSS/Atom  (collection_method: "rss")
-│   ├── sitemap.py         # generic sitemap   (collection_method: "sitemap")
-│   └── html.py            # generic HTML list (collection_method: "html")
-├── utils/
-│   ├── parser.py          # normalize raw -> canonical model, url canonicalization, hashing
-│   ├── storage.py         # atomic JSON store (data/raw_articles.json)
-│   ├── deduplicator.py    # persistent URL-hash + title-hash seen-set (data/seen.json)
-│   └── logger.py          # rotating file + stdout logging (logs/collector.log)
-├── deploy/
-│   ├── run_collect.sh     # launchd wrapper (activates venv, runs collect)
-│   └── com.rawipress.collector.plist  # launchd job, every 15 min
-├── data/                  # runtime output (gitignored)
-└── logs/                  # runtime logs (gitignored)
+├── app.py                      # CLI dispatcher
+├── config/sources.json         # source registry (add a source = JSON edit)
+├── collectors/                 # extraction (return raw dicts)
+│   ├── base.py                 #   shared retry session
+│   ├── rss.py                  #   robust: feedparser → lenient xml → HTML fallback
+│   ├── sitemap.py              #   walks sitemap → fetches + extracts each article
+│   ├── html.py                 #   config-driven CSS scraper (last resort)
+│   └── article.py              #   readability-lite content/date/author extractor
+├── core/                       # the platform
+│   ├── db.py                   #   SQLite schema + DAO (4 tables, WAL)
+│   ├── enrich.py               #   intelligence: lang/summary/keywords/entities/topic/sentiment/importance
+│   └── pipeline.py             #   collect→normalize→enrich→store→log→health→stats
+├── utils/                      # parser (normalize/canonical url/hash), http (retries), logger, dedup
+├── web/                        # FastAPI app
+│   ├── server.py               #   REST API + dashboard routes
+│   ├── templates/              #   home, articles, article, sources, analytics, logs
+│   └── static/                 #   style.css (dark emerald), analytics.js (Chart.js)
+├── tests/test_core.py          # unit tests (run: python tests/test_core.py)
+├── deploy/                     # deploy.sh, run_collect.sh, launchd plist
+└── data/  logs/                # runtime (gitignored): rawipress.db, collector.log
 ```
 
-## Data model
+## Database schema (SQLite — `data/rawipress.db`)
 
-Each stored item:
+| table | purpose | key columns |
+|---|---|---|
+| **articles** | enriched articles | id, **hash** (unique=dedup), source, title, url, content, summary, published_at, collected_at, category, language, tags, keywords, entities, author, sentiment, importance_score |
+| **sources** | registry + health | name, method, priority, enabled, last_collected_at, last_status, last_error, total_collected, success_count, failure_count |
+| **collection_logs** | per-run audit | run_id, source, started_at, finished_at, duration_ms, fetched, new_count, status, error |
+| **statistics** | daily snapshots | day, total, by_source, by_category, by_language |
 
-```json
-{
-  "id": "<sha1 of canonical url>",
-  "source": "spa",
-  "category": "government",
-  "title": "",
-  "url": "https://...",
-  "published_at": "ISO-8601 UTC or ''",
-  "content": "",
-  "summary": "",
-  "tags": [],
-  "collected_at": "ISO-8601 UTC"
-}
-```
+Dedup is enforced by the UNIQUE `hash` (canonical-URL sha1). Indexes on
+source / published_at / category / language / collected_at.
 
-## Collector contract
+## Intelligence layer (Phase 3)
 
-Each collector implements `collect()` and returns a list of **raw** dicts
-(`source, title, url, published_at, content, summary, tags`). The engine
-normalizes, dedupes, and stores them — collectors only do extraction.
+Pure Python, bilingual AR/EN, offline:
+- **language** — Arabic-glyph ratio
+- **summary** — extractive (keyword-ranked sentences); pluggable LLM hook via `enrich.set_llm_summarizer()`
+- **keywords** — frequency minus AR+EN stopwords
+- **entities** — Saudi org/location gazetteers + titled-person heuristic
+- **topic** — bilingual keyword gazetteer (Economy, Energy, Finance, Government, Vision 2030, AI, Sports, …)
+- **sentiment** — AR+EN polarity lexicon
+- **importance_score** — source priority + content depth + entity richness (0–100)
 
-Collection-method priority (per strategy): API > Sitemap > RSS > HTML > PDF > Social.
-HTML is last-resort (most fragile). API connectors slot in as new collector
-classes registered in `collectors/__init__.py`.
+## Dashboard (Phases 4–5)
 
-## Usage
+Dark, executive, terminal-inspired (black + emerald — Bloomberg/Palantir feel):
+- **Overview** — KPIs (total, today, sources, success rate), top sources/categories, latest feed
+- **Articles** — search + source/topic/lang/date filters, sort, pagination, detail view (summary, keywords, entities, full text)
+- **Source Monitor** — status, last collection, success/fail counts, last error
+- **Analytics** — by day / source / category / language charts, trending keywords, top entities
+- **Collection Logs** — every run with duration, fetched/new, errors
+
+## REST API (Phase 6)
+
+`/api/articles` (filters+pagination) · `/api/articles/{id}` · `/api/sources` ·
+`/api/stats` · `/api/search?q=` · `/api/dashboard`
+
+## Scheduling (Phase 7)
 
 ```bash
-source projects/venv/bin/activate     # on the Saudi node
-python app.py collect                 # run every enabled source once
-python app.py source arabnews         # run one source
-python app.py status                  # storage + registry summary
-python app.py list                    # list configured sources
+# launchd (recommended on the node) — every 15 min
+cp deploy/com.rawipress.collector.plist ~/Library/LaunchAgents/   # edit paths first
+launchctl load ~/Library/LaunchAgents/com.rawipress.collector.plist
+# or, simplest: foreground loop
+python app.py schedule 15
 ```
 
-## Scheduling (macOS launchd, every 15 min)
+## Scaling to 100+ sources (next steps)
 
-On the Saudi node (`ssh saudi`):
-
-```bash
-# paths in the plist assume /Users/graphics-2/Documents/RawiPress — edit if different
-cp deploy/com.rawipress.collector.plist ~/Library/LaunchAgents/
-launchctl load  ~/Library/LaunchAgents/com.rawipress.collector.plist
-launchctl start com.rawipress.collector          # run once now
-launchctl list | grep rawipress                  # confirm it's loaded
-tail -f logs/collector.log                        # watch it work
-```
-
-## Adding a source
-
-Append to `config/sources.json`:
-
-```jsonc
-// RSS
-{ "name": "okaz", "display_name": "Okaz", "category": "media",
-  "source_url": "https://www.okaz.com.sa",
-  "collection_method": "rss", "rss_url": "https://www.okaz.com.sa/rss",
-  "priority": 2, "enabled": true }
-
-// Sitemap (optional: sitemap_max_urls, sitemap_url_contains)
-{ "name": "cma", "category": "financial",
-  "collection_method": "sitemap", "sitemap_url": "https://cma.org.sa/sitemap.xml",
-  "sitemap_url_contains": "/news", "sitemap_max_urls": 100,
-  "priority": 1, "enabled": true }
-
-// HTML scrape (CSS selectors)
-{ "name": "example", "category": "media",
-  "collection_method": "html",
-  "list_url": "https://example.com/news",
-  "item_selector": "article.card", "title_selector": "h2 a",
-  "summary_selector": ".excerpt",
-  "priority": 3, "enabled": true }
-```
-
-## Important: run from inside Saudi Arabia
-
-Many Saudi gov/finance sites geo-restrict or serve different markup outside
-KSA. RSS feeds that 403/404 or parse as malformed from elsewhere typically
-behave correctly on the in-country node. Treat the Saudi node as the source
-of truth for what works; `"verified": true` in the registry marks feeds
-confirmed from inside KSA.
-
-## Roadmap
-
-1. ✅ Collectors + storage (this)   2. Postgres/Supabase   3. Dedup at scale
-4. Tagging   5. Arabic NLP   6. AI summaries   7. Search   8. Public API   9. Dashboard
+1. **Registry as data** — sources already config-driven; move `sources.json`
+   into the `sources` table + an admin form so non-devs can add feeds.
+2. **Concurrency** — collectors are independent; run them in a thread/process
+   pool with a politeness rate-limit per domain.
+3. **Postgres/Supabase** — swap `core/db.py` (same DAO interface) when SQLite
+   write contention shows; add full-text search (FTS5 now, tsvector later).
+4. **Per-source scheduling** — honor `crawl_frequency` instead of all-on-each-tick.
+5. **Article extraction tuning** — per-source content selectors for sites the
+   generic extractor misses; add PDF + API collectors (new classes in `collectors/__init__.py`).
+6. **LLM summaries** — wire `enrich.set_llm_summarizer()` to Claude for the
+   top-N by importance_score (cost-controlled).
+7. **Alerting** — source health → notify on consecutive failures.
