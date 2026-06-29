@@ -37,11 +37,19 @@ def _endpoint() -> str:
 
 
 def _headers() -> dict:
-    return {
+    # The ingest function authenticates on X-Ingest-Secret ALONE (it reads its own
+    # service-role key from its environment, not from our request). The Authorization
+    # bearer only satisfies Supabase's API gateway — the public anon key passes it
+    # just as well as the service-role key. So service-role is optional; we prefer it
+    # if present, fall back to the anon key, and omit the header if neither is set.
+    h = {
         "Content-Type": "application/json",
         "X-Ingest-Secret": env.get("INGEST_SECRET", required=True),
-        "Authorization": f"Bearer {env.get('SUPABASE_SERVICE_ROLE_KEY', required=True)}",
     }
+    bearer = env.get("SUPABASE_SERVICE_ROLE_KEY") or env.get("SUPABASE_ANON_KEY")
+    if bearer:
+        h["Authorization"] = f"Bearer {bearer}"
+    return h
 
 
 def _post_batch(endpoint: str, headers: dict, channel_id: str, items: list[dict]) -> dict:
