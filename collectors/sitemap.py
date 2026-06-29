@@ -53,9 +53,11 @@ class SitemapCollector(BaseCollector):
             return []
         if kind == "urlset":
             return payload
-        # index -> walk children until we have enough candidates
+        # index -> walk children until we have enough candidates. Walk NEWEST
+        # first: date-partitioned indexes (e.g. /sitemaps/2017/1/...) list oldest
+        # first, so reversed() gets the most recent months/sections.
         out: list[dict] = []
-        for child in payload:
+        for child in reversed(payload):
             if len(out) >= max_urls * 3:
                 break
             try:

@@ -54,14 +54,13 @@
       "category": "media",
       "channel_id": null,
       "source_url": "https://english.aawsat.com",
-      "collection_method": "sitemap",
-      "sitemap_url": "https://english.aawsat.com/sitemap.xml",
-      "sitemap_url_regex": "\\d{5,}",
-      "sitemap_max_urls": 25,
-      "extract_content": true,
+      "collection_method": "rss",
       "priority": 3,
       "enabled": true,
-      "verified": false
+      "verified": true,
+      "rss_url": "https://english.aawsat.com/feed",
+      "fetch_full_content": true,
+      "full_content_max": 25
     },
     {
       "name": "argaam",
@@ -81,10 +80,11 @@
         "summary_selector": "p"
       },
       "priority": 2,
-      "enabled": true,
+      "enabled": false,
       "verified": false,
       "fetch_full_content": true,
-      "full_content_max": 25
+      "full_content_max": 25,
+      "note": "sitemapindex returns HTML (Cloudflare/anti-bot); /rss not a real feed. Needs node-side investigation or Argaam API."
     },
     {
       "name": "sabq",
@@ -92,22 +92,13 @@
       "category": "media",
       "channel_id": null,
       "source_url": "https://sabq.org",
-      "collection_method": "rss",
-      "rss_url": "https://sabq.org/rss",
-      "rss_fallbacks": [
-        "https://sabq.org/feed",
-        "https://sabq.org/rss.xml"
-      ],
-      "html_fallback": {
-        "list_url": "https://sabq.org",
-        "item_selector": "article a, .post-title a, h2 a, h3 a",
-        "title_selector": "self"
-      },
+      "collection_method": "sitemap",
       "priority": 2,
       "enabled": true,
-      "verified": false,
-      "fetch_full_content": true,
-      "full_content_max": 25
+      "verified": true,
+      "sitemap_url": "https://sabq.org/sitemap-news.xml",
+      "sitemap_max_urls": 25,
+      "extract_content": true
     },
     {
       "name": "ajel",
@@ -163,10 +154,11 @@
       "collection_method": "rss",
       "rss_url": "https://www.alriyadh.com/rss",
       "priority": 1,
-      "enabled": true,
+      "enabled": false,
       "verified": false,
       "fetch_full_content": true,
-      "full_content_max": 25
+      "full_content_max": 25,
+      "note": "HTTPS certificate chain broken (SSL verify fails) + no /rss path. Verify a working endpoint on node."
     },
     {
       "name": "okaz",
@@ -174,13 +166,13 @@
       "category": "media",
       "channel_id": null,
       "source_url": "https://www.okaz.com.sa",
-      "collection_method": "rss",
-      "rss_url": "https://www.okaz.com.sa/rss",
+      "collection_method": "sitemap",
       "priority": 2,
       "enabled": true,
-      "verified": false,
-      "fetch_full_content": true,
-      "full_content_max": 25
+      "verified": true,
+      "sitemap_url": "https://www.okaz.com.sa/sitemaps/news_sitemap.xml",
+      "sitemap_max_urls": 25,
+      "extract_content": true
     },
     {
       "name": "alwatan",
@@ -188,13 +180,13 @@
       "category": "media",
       "channel_id": null,
       "source_url": "https://www.alwatan.com.sa",
-      "collection_method": "rss",
-      "rss_url": "https://www.alwatan.com.sa/rss",
+      "collection_method": "sitemap",
       "priority": 2,
       "enabled": true,
-      "verified": false,
-      "fetch_full_content": true,
-      "full_content_max": 25
+      "verified": true,
+      "sitemap_url": "https://www.alwatan.com.sa/sitemaps/news_sitemap.xml",
+      "sitemap_max_urls": 25,
+      "extract_content": true
     },
     {
       "name": "alyaum",
@@ -202,13 +194,13 @@
       "category": "media",
       "channel_id": null,
       "source_url": "https://www.alyaum.com",
-      "collection_method": "rss",
-      "rss_url": "https://www.alyaum.com/rss",
+      "collection_method": "sitemap",
       "priority": 2,
       "enabled": true,
-      "verified": false,
-      "fetch_full_content": true,
-      "full_content_max": 25
+      "verified": true,
+      "sitemap_url": "https://www.alyaum.com/sitemaps/news_sitemap.xml",
+      "sitemap_max_urls": 25,
+      "extract_content": true
     },
     {
       "name": "almadina",
@@ -216,13 +208,13 @@
       "category": "media",
       "channel_id": null,
       "source_url": "https://www.al-madina.com",
-      "collection_method": "rss",
-      "rss_url": "https://www.al-madina.com/rss",
+      "collection_method": "sitemap",
       "priority": 2,
       "enabled": true,
       "verified": false,
-      "fetch_full_content": true,
-      "full_content_max": 25
+      "sitemap_url": "https://www.al-madina.com/sitemaps/sitemap_0.xml",
+      "sitemap_max_urls": 25,
+      "extract_content": true
     },
     {
       "name": "makkah",
@@ -249,8 +241,9 @@
       "sitemap_max_urls": 25,
       "extract_content": true,
       "priority": 3,
-      "enabled": true,
-      "verified": false
+      "enabled": false,
+      "verified": false,
+      "note": "sitemap returns non-XML (Cloudflare); no public RSS. Find real feed/sitemap on node."
     },
     {
       "name": "aleqt",
