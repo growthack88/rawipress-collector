@@ -1,0 +1,101 @@
+/* RawiPress Terminal OS — operations-center theme.
+   Colours come from the registered `rawi` theme ($primary emerald, etc.). */
+
+Screen {
+    background: $background;
+    color: $foreground;
+    layout: vertical;
+}
+
+/* ── panel chrome ──────────────────────────────────────────────────── */
+Card {
+    border: round $primary;
+    border-title-color: $primary;
+    border-title-style: bold;
+    border-subtitle-color: #A1A1AA;
+    background: $surface;
+    margin: 1 1 0 1;
+    padding: 0 1;
+    height: auto;
+}
+
+/* ── masthead ──────────────────────────────────────────────────────── */
+LogoHeader {
+    height: auto;
+    background: $background;
+    border-bottom: heavy $panel;
+}
+
+/* ── dashboard ─────────────────────────────────────────────────────── */
+#dash-body { height: 1fr; }
+#dash-left { width: 2fr; height: 1fr; }
+#dash-right { width: 1fr; height: 1fr; }
+
+#stats-card { height: auto; }
+#outcomes-card { height: 1fr; }
+#activity-card { height: 3fr; }
+#health-card { height: 2fr; }
+
+/* ── tables / full-height screens ──────────────────────────────────── */
+#sources-card, #logs-card, #articles-card, #settings-card {
+    height: 1fr;
+    margin: 1 1 1 1;
+}
+
+DataTable {
+    height: 1fr;
+    background: $surface;
+    color: $foreground;
+}
+DataTable > .datatable--header {
+    background: $panel;
+    color: $primary;
+    text-style: bold;
+}
+DataTable > .datatable--cursor {
+    background: $primary 25%;
+}
+
+#logs-scroll { height: 1fr; }
+
+/* ── articles ──────────────────────────────────────────────────────── */
+#articles-body { height: 1fr; }
+#capture-feed { width: 3fr; }
+#article-detail {
+    width: 2fr;
+    border-left: heavy $panel;
+    padding: 0 1;
+}
+#capture-status { height: 1; margin-bottom: 1; }
+
+/* ── analytics ─────────────────────────────────────────────────────── */
+#analytics-body { height: 1fr; }
+#analytics-left { width: 1fr; height: 1fr; }
+#analytics-right { width: 1fr; height: 1fr; }
+#top-card, #hour-card { height: 3fr; }
+#cat-card, #success-card { height: 2fr; }
+
+/* ── search modal ──────────────────────────────────────────────────── */
+SearchScreen {
+    align: center middle;
+    background: $background 60%;
+}
+#search-box {
+    width: 70;
+    height: auto;
+    padding: 1 2;
+    background: $panel;
+    border: round $primary;
+}
+#search-title { color: $primary; text-style: bold; }
+#search-hint { color: #A1A1AA; }
+#search-input { margin: 1 0; }
+
+/* ── footer ────────────────────────────────────────────────────────── */
+Footer {
+    background: $panel;
+}
+Footer > .footer--key {
+    color: $primary;
+    text-style: bold;
+}

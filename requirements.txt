@@ -7,3 +7,11 @@ python-dateutil>=2.9
 
 # Push-only collector: no storage/AI/web deps. The cloud ingest pipeline does
 # dedup, summarization, entities, and rendering.
+
+# --- terminal dashboard (dashboard/app.py) ---
+# Optional: only needed to run the RawiPress Terminal OS monitoring console.
+# Reads local telemetry (sources.json, collector.log, sent-cache, metrics) —
+# it does NOT add storage to the collector.
+textual>=0.80
+rich>=13.7
+psutil>=5.9
