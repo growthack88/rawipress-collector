@@ -93,7 +93,7 @@ class SitemapCollector(BaseCollector):
         for u in candidates:
             base = {
                 "source": self.name, "url": u["url"], "published_at": u.get("lastmod", ""),
-                "title": "", "content": "", "summary": "", "tags": [], "author": "",
+                "title": "", "content": "", "summary": "", "tags": [], "author": "", "image": "",
             }
             if do_extract:
                 try:
@@ -101,6 +101,7 @@ class SitemapCollector(BaseCollector):
                     base["title"] = art["title"]
                     base["content"] = art["content"]
                     base["author"] = art["author"]
+                    base["image"] = art.get("image", "")
                     base["published_at"] = art["published_at"] or base["published_at"]
                 except Exception as exc:
                     self.log.warning("extract failed %s: %s", u["url"], exc)

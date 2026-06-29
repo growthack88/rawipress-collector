@@ -1,7 +1,8 @@
 """Centralized logging for Rawi Press collectors.
 
-Logs go to both logs/collector.log (rotating) and stdout so the same
-output is visible whether run interactively or under launchd.
+Logs go to both logs/collector.log (rotating) and stderr so the same
+output is visible whether run interactively or under launchd — and stdout
+stays clean for piping (e.g. `app.py dry-run | jq`).
 """
 import logging
 import sys
@@ -29,7 +30,7 @@ def get_logger(name: str = "rawipress") -> logging.Logger:
     )
     file_handler.setFormatter(formatter)
 
-    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
 
     logger.addHandler(file_handler)

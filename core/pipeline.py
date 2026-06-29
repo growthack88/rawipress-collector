@@ -1,121 +1,184 @@
-"""Collection pipeline (Phases 1+2+3+8 orchestration).
+"""Push-only collection pipeline.
 
-collect -> normalize -> enrich -> dedup-store(SQLite) -> log + health + stats.
+collect (reuse existing collectors) -> map to IngestItem -> POST to the cloud
+`ingest` edge function. The cloud does dedup, AI summary, entities, story
+grouping, and storage; the collector stores and computes nothing.
 
-Per-source failures are isolated and recorded in collection_logs; one bad
-source never aborts a run. Deduplication is enforced by the UNIQUE hash
-(canonical URL) constraint in the articles table.
+Per-source failures are isolated: one bad feed/handle logs an error and the
+rest of the run still completes.
 """
 from __future__ import annotations
 
 import json
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from collectors import build_collector
-from core import db
-from core.enrich import enrich
+from collectors.social_x import fetch_x_posts
+from core import ingest_client
+from core.sent_cache import SentCache
 from utils.logger import get_logger
-from utils.parser import normalize
+from utils.parser import canonical_url, normalize, to_iso
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES_FILE = ROOT / "config" / "sources.json"
 log = get_logger("pipeline")
 
+# channel_id values that mean "not wired up yet" — such sources are skipped.
+_PLACEHOLDERS = {"", "PASTE-UUID-HERE", "PASTE-CHANNEL-UUID", "PASTE-CHANNEL-UUID-HERE"}
+
+
+def _config() -> dict:
+    with open(SOURCES_FILE, encoding="utf-8") as fh:
+        return json.load(fh)
+
 
 def load_sources() -> list[dict]:
-    with open(SOURCES_FILE, encoding="utf-8") as fh:
-        return json.load(fh).get("sources", [])
+    """News sources. Accepts the new 'news' key, falls back to legacy 'sources'."""
+    cfg = _config()
+    return cfg.get("news") or cfg.get("sources", [])
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def load_social() -> list[dict]:
+    return _config().get("social", [])
 
 
-def run_source(conn, source: dict, run_id: str) -> dict:
+def _has_channel(entry: dict) -> bool:
+    cid = (entry.get("channel_id") or "").strip()
+    if cid in _PLACEHOLDERS:
+        log.warning("[%s] no channel_id set — skipping (create the channel "
+                    "in source_channels, then paste its id into sources.json)",
+                    entry.get("name", "?"))
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Mapping: raw collector output -> IngestItem
+# --------------------------------------------------------------------------- #
+def _drop_empty(item: dict) -> dict:
+    """Keep required + non-empty optional fields (original_url always kept)."""
+    return {k: v for k, v in item.items() if k == "original_url" or v not in ("", None, {})}
+
+
+def news_to_ingest(raw_items: list[dict], source: dict) -> list[dict]:
+    items: list[dict] = []
+    for raw in raw_items:
+        if not raw.get("url"):
+            continue
+        n = normalize(raw, source)
+        body = n["content"] or n["summary"]
+        items.append(_drop_empty({
+            "original_url": n["url"],
+            "title": n["title"],
+            "body": body,
+            "media_url": n["image"],
+            "media_type": "image" if n["image"] else "",
+            "posted_at": n["published_at"],
+        }))
+    return items
+
+
+def social_to_ingest(posts: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    for p in posts:
+        url = canonical_url(p.get("url", ""))
+        if not url:
+            continue
+        text = (p.get("text") or "").strip()
+        items.append(_drop_empty({
+            "original_url": url,
+            "title": text[:80],
+            "body": text,
+            "media_url": p.get("image", ""),
+            "media_type": p.get("media_type", ""),
+            "posted_at": to_iso(p.get("posted_at", "")),
+            "raw_engagement": p.get("engagement") or {},
+        }))
+    return items
+
+
+# --------------------------------------------------------------------------- #
+# Per-source / per-channel runs
+# --------------------------------------------------------------------------- #
+def run_news_source(source: dict, cache: SentCache, dry_run: bool = False) -> dict:
     name = source.get("name", "?")
-    started = _now()
-    t0 = time.time()
-    fetched, new_count, status, error = 0, 0, "ok", ""
-
     if not source.get("enabled", True):
-        return {"source": name, "skipped": True, "new": 0}
-
+        return {"source": name, "skipped": "disabled"}
+    if not dry_run and not _has_channel(source):
+        return {"source": name, "skipped": "no_channel"}
     try:
-        raw_items = build_collector(source).collect()
-        normalized = [normalize(r, source) for r in raw_items if r.get("url")]
-        fetched = len(normalized)
-        for item in normalized:
-            item["hash"] = item["id"]
-            enrich(item, source)
-            if db.insert_article(conn, item):
-                new_count += 1
+        raw = build_collector(source).collect()
+        items = news_to_ingest(raw, source)
+        return _send(name, source.get("channel_id", ""), items, cache, dry_run)
     except Exception as exc:
-        status, error = "error", f"{type(exc).__name__}: {exc}"
-        log.exception("[%s] collector failed", name)
-
-    finished = _now()
-    duration_ms = int((time.time() - t0) * 1000)
-    db.insert_log(conn, {
-        "run_id": run_id, "source": name, "started_at": started,
-        "finished_at": finished, "duration_ms": duration_ms,
-        "fetched": fetched, "new_count": new_count, "status": status, "error": error,
-    })
-    db.record_source_run(conn, name, status=status, new_count=new_count, error=error)
-    conn.commit()
-    log.info("[%s] %s — %d fetched, %d new (%dms)", name, status, fetched, new_count, duration_ms)
-    return {"source": name, "status": status, "fetched": fetched, "new": new_count, "error": error}
+        log.exception("[%s] news collection failed", name)
+        return {"source": name, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
-def run_collection(source_names: list[str] | None = None) -> dict:
-    db.init_db()
-    sources = load_sources()
-    conn = db.connect()
+def run_social_channel(chan: dict, cache: SentCache, dry_run: bool = False) -> dict:
+    name = chan.get("name", "?")
+    if not chan.get("enabled", True):
+        return {"source": name, "skipped": "disabled"}
+    if not dry_run and not _has_channel(chan):
+        return {"source": name, "skipped": "no_channel"}
+    platform = chan.get("platform", "x")
+    if platform != "x":
+        log.warning("[%s] unsupported social platform '%s' — skipping", name, platform)
+        return {"source": name, "skipped": f"unsupported:{platform}"}
     try:
-        for s in sources:
-            db.upsert_source(conn, s)
-        conn.commit()
+        posts = fetch_x_posts(chan["handle"], int(chan.get("max_posts", 30)))
+        items = social_to_ingest(posts)
+        return _send(name, chan.get("channel_id", ""), items, cache, dry_run)
+    except Exception as exc:
+        log.exception("[%s] social collection failed", name)
+        return {"source": name, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
-        if source_names:
-            wanted = set(source_names)
-            sources = [s for s in sources if s.get("name") in wanted]
 
-        run_id = datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ")
-        log.info("=== %s: %d sources ===", run_id, len(sources))
-        results = [run_source(conn, s, run_id) for s in sources]
+def _send(name: str, channel_id: str, items: list[dict], cache: SentCache, dry_run: bool) -> dict:
+    mapped = len(items)
+    items = cache.filter_unsent(items)
+    if dry_run:
+        log.info("[%s] DRY-RUN — %d items mapped (%d after local cache)", name, mapped, len(items))
+        return {"source": name, "status": "dry-run", "mapped": mapped, "items": items}
+    if not items:
+        log.info("[%s] nothing to send (%d mapped, all cached)", name, mapped)
+        return {"source": name, "status": "ok", "mapped": mapped,
+                "found": 0, "new": 0, "skipped": 0}
+    result = ingest_client.post_items(channel_id, items)
+    for it in items:
+        cache.mark(it["original_url"])
+    log.info("[%s] ok — %d sent, found=%s new=%s skipped=%s",
+             name, len(items), result.get("found"), result.get("new"), result.get("skipped"))
+    return {"source": name, "status": "ok", "mapped": mapped, **result}
 
-        db.snapshot_daily(conn)
-        conn.commit()
-    finally:
-        conn.close()
+
+# --------------------------------------------------------------------------- #
+# Orchestration
+# --------------------------------------------------------------------------- #
+def run_collection(source_names: list[str] | None = None,
+                   include_social: bool = True,
+                   dry_run: bool = False) -> dict:
+    news = load_sources()
+    social = load_social() if include_social else []
+    if source_names:
+        wanted = set(source_names)
+        news = [s for s in news if s.get("name") in wanted]
+        social = [s for s in social if s.get("name") in wanted]
+
+    run_id = datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ")
+    log.info("=== %s: %d news + %d social%s ===",
+             run_id, len(news), len(social), " (dry-run)" if dry_run else "")
+
+    cache = SentCache()
+    results: list[dict] = []
+    for s in news:
+        results.append(run_news_source(s, cache, dry_run))
+    for c in social:
+        results.append(run_social_channel(c, cache, dry_run))
+    cache.save()
 
     total_new = sum(r.get("new", 0) for r in results)
-    log.info("=== run complete: %d new articles ===", total_new)
+    total_sent = sum(len(r.get("items", [])) if dry_run else r.get("mapped", 0) for r in results)
+    log.info("=== run complete: %d items, %d new ===", total_sent, total_new)
     return {"run_id": run_id, "total_new": total_new, "results": results}
-
-
-def migrate_json(json_path: str | None = None) -> int:
-    """Import a legacy data/raw_articles.json into SQLite (one-time)."""
-    path = Path(json_path) if json_path else ROOT / "data" / "raw_articles.json"
-    if not path.exists():
-        log.info("no legacy json at %s", path)
-        return 0
-    db.init_db()
-    with open(path, encoding="utf-8") as fh:
-        articles = json.load(fh)
-    conn = db.connect()
-    imported = 0
-    try:
-        for a in articles:
-            a["hash"] = a.get("id") or a.get("hash")
-            if not a.get("hash"):
-                continue
-            enrich(a)  # backfill intelligence fields
-            if db.insert_article(conn, a):
-                imported += 1
-        conn.commit()
-    finally:
-        conn.close()
-    log.info("migrated %d legacy articles", imported)
-    return imported

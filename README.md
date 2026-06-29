@@ -1,15 +1,22 @@
-# Rawi Press v2 — Saudi News Intelligence Platform
+# Rawi Press — Saudi Collector
 
-From a simple RSS collector to a collection → enrichment → storage → dashboard →
-API platform for official Saudi sources. Pure-Python intelligence layer (no ML
-deps, no API keys) so the in-KSA node stays self-contained.
+A **push-only** collector that runs on a Mac **inside Saudi Arabia** (most Saudi
+news sites geo-block non-KSA IPs) and POSTs raw articles + X posts to the cloud
+`ingest` edge function. It does **not** store, summarize, deduplicate, extract
+entities, or render anything — the cloud pipeline does all of that.
 
 ```
-collect ─▶ normalize ─▶ enrich (AI-lite) ─▶ SQLite ─▶ Dashboard + REST API
- RSS/Sitemap/HTML       lang·summary·keywords        WAL    FastAPI + Jinja
- (full article text)    entities·topic·sentiment             dark "Bloomberg" UI
-                        importance score
+[Saudi sites + X]  →  COLLECTOR (KSA, this repo)  →  POST raw items
+                                                       ↓
+                         Supabase /functions/v1/ingest
+                         (dedup → AI summarize → entities → story → store)
+                                                       ↓
+                                    web app reads & displays
 ```
+
+The collector is the only component inside KSA. It PUSHES. Everything else
+(database, AI, website) lives in the cloud and only READS. **Never add
+storage/summarization/translation/entity logic here.**
 
 ## Quick start
 
@@ -19,111 +26,126 @@ git clone https://github.com/growthack88/rawipress-collector.git RawiPress && cd
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python app.py collect          # collect + enrich + store
-python app.py serve            # dashboard at http://127.0.0.1:8787
+cp .env.example .env        # then fill in the secrets (see below)
+python app.py dry-run arabnews   # map items, print JSON, no POST
+python app.py collect            # collect news + social, POST to ingest
 ```
 
-> On the Saudi node, the existing `projects/venv` already has the collection
-> deps — just `pip install fastapi uvicorn jinja2 python-dateutil` into it,
-> or use a fresh `.venv` as above. Run from **inside KSA** — feeds geo-block.
+Run from **inside KSA** — Saudi feeds geo-block elsewhere.
+
+## Secrets (`.env`, gitignored)
+
+| var | where to get it |
+|---|---|
+| `SUPABASE_URL` | `https://uiwblgqhpjhbtmlgnfkk.supabase.co` |
+| `INGEST_SECRET` | Supabase → Edge Functions → secrets |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Project Settings → API |
+| `X_BEARER_TOKEN` / `APIFY_TOKEN` / `NITTER_INSTANCES` | one X fetch method (optional) |
+
+The device is Tailscale-only and trusted, so holding the service key locally is
+acceptable — just never commit `.env`.
 
 ## CLI
 
 ```bash
-python app.py collect              # all enabled sources
-python app.py source spa           # one source
-python app.py status               # storage + per-source health
-python app.py list                 # configured sources
-python app.py serve [host] [port]  # dashboard + API (default 127.0.0.1:8787)
-python app.py schedule [minutes]   # foreground auto-collector (default 15)
-python app.py initdb               # create schema
-python app.py migrate [path]       # import legacy raw_articles.json
+python app.py collect              # news + social once → POST to ingest
+python app.py news                 # news sources only
+python app.py social               # X/social channels only
+python app.py source <name>        # one source/channel by name
+python app.py dry-run [name]       # map to IngestItems + print JSON, no POST
+python app.py list                 # configured sources + channels (chan:✓/✗)
+python app.py schedule [min]       # foreground auto-collector (default 15)
 ```
+
+Logs go to stderr + `logs/collector.log`; `dry-run` prints clean JSON to stdout
+(`python app.py dry-run arabnews | jq`).
+
+## How to add a source
+
+1. **Create the channel in Supabase first.** Every item is tagged with a
+   `channel_id` = the uuid of a row in `source_channels`. Create the `Source`,
+   then a `Channel` per feed/handle, with **`ingest_method = 'ksa_collector'`**
+   and `is_active = true`. Via SQL editor:
+
+   ```sql
+   insert into source_channels (source_id, platform, handle, channel_url, ingest_method, is_active)
+   values ('<source_uuid>', 'rss', null, 'https://www.arabnews.com/rss.xml', 'ksa_collector', true)
+   returning id;     -- paste this id into config/sources.json
+   ```
+
+   `ingest_method='ksa_collector'` keeps the retired cloud pullers from
+   double-ingesting these channels.
+
+2. **Add the entry to `config/sources.json`** with that `channel_id`:
+
+   ```jsonc
+   // news[] — collection_method: rss | sitemap | html
+   { "name": "arabnews", "channel_id": "PASTE-UUID", "collection_method": "rss",
+     "rss_url": "https://www.arabnews.com/rss.xml", "enabled": true,
+     "fetch_full_content": true }     // follow links for full body (RSS only)
+
+   // social[] — platform 'x'; cloud stores these as social_post automatically
+   { "name": "saudinews50_x", "channel_id": "PASTE-UUID", "platform": "x",
+     "handle": "SaudiNews50", "max_posts": 30, "enabled": true }
+   ```
+
+   Sources with `channel_id: null` are **skipped with a warning** — wire them up
+   when the channel exists.
+
+## The ingest contract
+
+`POST {SUPABASE_URL}/functions/v1/ingest` with headers `X-Ingest-Secret` and
+`Authorization: Bearer <service role key>`, body
+`{"channel_id": "<uuid>", "items": [IngestItem, ...]}` (≤25 items/batch,
+auto-chunked). Response: `{found, new, skipped}`.
+
+**IngestItem** (only `original_url` required): `original_url`, `title`, `body`
+(full text), `media_url`, `media_type` (`image|video`), `posted_at` (ISO-8601
+UTC), `raw_engagement` (social). The cloud dedups on
+`sha256(normalized_url + lowercased_title)`, so re-sending is safe and cheap.
 
 ## Architecture
 
 ```
 RawiPress/
-├── app.py                      # CLI dispatcher
-├── config/sources.json         # source registry (add a source = JSON edit)
-├── collectors/                 # extraction (return raw dicts)
-│   ├── base.py                 #   shared retry session
-│   ├── rss.py                  #   robust: feedparser → lenient xml → HTML fallback
-│   ├── sitemap.py              #   walks sitemap → fetches + extracts each article
-│   ├── html.py                 #   config-driven CSS scraper (last resort)
-│   └── article.py              #   readability-lite content/date/author extractor
-├── core/                       # the platform
-│   ├── db.py                   #   SQLite schema + DAO (4 tables, WAL)
-│   ├── enrich.py               #   intelligence: lang/summary/keywords/entities/topic/sentiment/importance
-│   └── pipeline.py             #   collect→normalize→enrich→store→log→health→stats
-├── utils/                      # parser (normalize/canonical url/hash), http (retries), logger, dedup
-├── web/                        # FastAPI app
-│   ├── server.py               #   REST API + dashboard routes
-│   ├── templates/              #   home, articles, article, sources, analytics, logs
-│   └── static/                 #   style.css (dark emerald), analytics.js (Chart.js)
-├── tests/test_core.py          # unit tests (run: python tests/test_core.py)
-├── deploy/                     # deploy.sh, run_collect.sh, launchd plist
-└── data/  logs/                # runtime (gitignored): rawipress.db, collector.log
+├── app.py                    # CLI dispatcher
+├── config/sources.json       # news[] + social[] registry (add a source = JSON edit)
+├── collectors/               # extraction only (return raw dicts) — REUSED
+│   ├── rss.py                #   feedparser → lenient xml → HTML fallback; opt-in full-body fetch
+│   ├── sitemap.py            #   walk sitemap → fetch + extract each article (full body)
+│   ├── html.py               #   config-driven CSS scraper (last resort)
+│   ├── article.py            #   readability-lite content/date/author/image extractor
+│   └── social_x.py           #   X via API v2 / Apify / Nitter (pluggable fetch_x_posts)
+├── core/
+│   ├── pipeline.py           #   collect → map to IngestItem → POST (news + social)
+│   ├── ingest_client.py      #   POST batches to /functions/v1/ingest (retry on 5xx)
+│   ├── sent_cache.py         #   optional local already-sent cache (RAWI_SENT_CACHE=1)
+│   └── env.py                #   .env loader + typed getters (no python-dotenv)
+├── utils/                    # parser (normalize/canonical url/iso dates), http (retries), logger
+├── tests/test_core.py        # mapping + batching tests (python tests/test_core.py)
+├── deploy/                   # deploy.sh, run_collect.sh, launchd plist (every 15 min)
+└── logs/                     # runtime (gitignored)
 ```
 
-## Database schema (SQLite — `data/rawipress.db`)
-
-| table | purpose | key columns |
-|---|---|---|
-| **articles** | enriched articles | id, **hash** (unique=dedup), source, title, url, content, summary, published_at, collected_at, category, language, tags, keywords, entities, author, sentiment, importance_score |
-| **sources** | registry + health | name, method, priority, enabled, last_collected_at, last_status, last_error, total_collected, success_count, failure_count |
-| **collection_logs** | per-run audit | run_id, source, started_at, finished_at, duration_ms, fetched, new_count, status, error |
-| **statistics** | daily snapshots | day, total, by_source, by_category, by_language |
-
-Dedup is enforced by the UNIQUE `hash` (canonical-URL sha1). Indexes on
-source / published_at / category / language / collected_at.
-
-## Intelligence layer (Phase 3)
-
-Pure Python, bilingual AR/EN, offline:
-- **language** — Arabic-glyph ratio
-- **summary** — extractive (keyword-ranked sentences); pluggable LLM hook via `enrich.set_llm_summarizer()`
-- **keywords** — frequency minus AR+EN stopwords
-- **entities** — Saudi org/location gazetteers + titled-person heuristic
-- **topic** — bilingual keyword gazetteer (Economy, Energy, Finance, Government, Vision 2030, AI, Sports, …)
-- **sentiment** — AR+EN polarity lexicon
-- **importance_score** — source priority + content depth + entity richness (0–100)
-
-## Dashboard (Phases 4–5)
-
-Dark, executive, terminal-inspired (black + emerald — Bloomberg/Palantir feel):
-- **Overview** — KPIs (total, today, sources, success rate), top sources/categories, latest feed
-- **Articles** — search + source/topic/lang/date filters, sort, pagination, detail view (summary, keywords, entities, full text)
-- **Source Monitor** — status, last collection, success/fail counts, last error
-- **Analytics** — by day / source / category / language charts, trending keywords, top entities
-- **Collection Logs** — every run with duration, fetched/new, errors
-
-## REST API (Phase 6)
-
-`/api/articles` (filters+pagination) · `/api/articles/{id}` · `/api/sources` ·
-`/api/stats` · `/api/search?q=` · `/api/dashboard`
-
-## Scheduling (Phase 7)
+## Deploy on the Saudi node
 
 ```bash
-# launchd (recommended on the node) — every 15 min
+bash deploy/deploy.sh      # rsync code to saudi:~/Documents/RawiPress + smoke test
+# enable the 15-min schedule:
 cp deploy/com.rawipress.collector.plist ~/Library/LaunchAgents/   # edit paths first
 launchctl load ~/Library/LaunchAgents/com.rawipress.collector.plist
-# or, simplest: foreground loop
-python app.py schedule 15
 ```
 
-## Scaling to 100+ sources (next steps)
+`deploy.sh` never touches the node's `data/`, `logs/`, or venv. The launchd job
+runs `deploy/run_collect.sh` (→ `app.py collect`) every 15 min.
 
-1. **Registry as data** — sources already config-driven; move `sources.json`
-   into the `sources` table + an admin form so non-devs can add feeds.
-2. **Concurrency** — collectors are independent; run them in a thread/process
-   pool with a politeness rate-limit per domain.
-3. **Postgres/Supabase** — swap `core/db.py` (same DAO interface) when SQLite
-   write contention shows; add full-text search (FTS5 now, tsvector later).
-4. **Per-source scheduling** — honor `crawl_frequency` instead of all-on-each-tick.
-5. **Article extraction tuning** — per-source content selectors for sites the
-   generic extractor misses; add PDF + API collectors (new classes in `collectors/__init__.py`).
-6. **LLM summaries** — wire `enrich.set_llm_summarizer()` to Claude for the
-   top-N by importance_score (cost-controlled).
-7. **Alerting** — source health → notify on consecutive failures.
+## Acceptance tests
+
+1. **Dry run** — `app.py dry-run arabnews` prints IngestItems; every one has
+   `original_url` + non-empty `body`. ✅
+2. **Live batch** — with a real `channel_id`, `app.py source arabnews` returns
+   `{found,new,...}` and rows appear in the review queue.
+3. **Dedup** — run a source twice; the second run returns `new: 0`.
+4. **Social** — `app.py source <x-channel>` → items appear as `social_post`.
+5. **Failure isolation** — a bad source logs an error; the rest of the run
+   completes. ✅

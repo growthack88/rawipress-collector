@@ -1,13 +1,9 @@
-# --- collection ---
+# --- collection (fetch + parse) ---
 requests>=2.31
 beautifulsoup4>=4.12
 feedparser>=6.0
 lxml>=5.0
 python-dateutil>=2.9
 
-# --- web dashboard + API ---
-fastapi>=0.110
-uvicorn>=0.29
-jinja2>=3.1
-
-# intelligence layer is pure-Python (no ML deps) so the node stays self-contained
+# Push-only collector: no storage/AI/web deps. The cloud ingest pipeline does
+# dedup, summarization, entities, and rendering.

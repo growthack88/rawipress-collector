@@ -4,13 +4,16 @@
 set -euo pipefail
 
 RAWI_HOME="${RAWI_HOME:-$HOME/Documents/RawiPress}"
-VENV_PY="${RAWI_HOME}/projects/venv/bin/python"
-
 cd "$RAWI_HOME"
 
-if [ -x "$VENV_PY" ]; then
-    exec "$VENV_PY" app.py collect
+# Prefer a project venv (projects/venv on the node, or a local .venv), else PATH.
+if [ -x "${RAWI_HOME}/projects/venv/bin/python" ]; then
+    PY="${RAWI_HOME}/projects/venv/bin/python"
+elif [ -x "${RAWI_HOME}/.venv/bin/python" ]; then
+    PY="${RAWI_HOME}/.venv/bin/python"
 else
-    # fall back to whatever python3 is on PATH
-    exec python3 app.py collect
+    PY="python3"
 fi
+
+# Secrets come from .env (loaded by core/env.py). `collect` = news + social once.
+exec "$PY" app.py collect

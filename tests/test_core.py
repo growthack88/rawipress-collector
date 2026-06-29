@@ -1,12 +1,11 @@
-"""Core tests (Phase 8). Run: python tests/test_core.py  (or: pytest)"""
+"""Core tests for the push-only collector. Run: python tests/test_core.py (or pytest)."""
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from utils.parser import canonical_url, url_id, normalize  # noqa: E402
-from core import enrich, db  # noqa: E402
+from utils.parser import canonical_url, url_id, to_iso, normalize  # noqa: E402
+from core import pipeline, ingest_client  # noqa: E402
 
 
 def test_canonical_url_strips_tracking():
@@ -19,50 +18,78 @@ def test_url_id_stable():
     assert url_id("https://ex.com/a") == url_id("https://ex.com/a/")
 
 
-def test_language_detection():
-    assert enrich.detect_language("وزارة الاستثمار تعلن عن مشروع جديد") == "ar"
-    assert enrich.detect_language("Saudi Arabia announces a new project") == "en"
+def test_to_iso_parses_string_dates():
+    # +03:00 (KSA) converts to UTC; unparseable -> "" (cloud defaults to now)
+    assert to_iso("2026-06-29T10:00:00+03:00") == "2026-06-29T07:00:00+00:00"
+    assert to_iso("not a date") == ""
+    assert to_iso("") == ""
 
 
-def test_keywords_skip_stopwords():
-    kws = enrich.extract_keywords("The economy economy economy of the kingdom grows")
-    assert "economy" in kws
-    assert "the" not in kws
+def test_news_to_ingest_shape():
+    raw = [{
+        "url": "https://ex.com/a?utm_source=x",
+        "title": "  Hello  ",
+        "content": "Full article body text here.",
+        "summary": "snippet",
+        "published_at": "2026-06-29T10:00:00+03:00",
+        "image": "https://ex.com/i.jpg",
+    }]
+    items = pipeline.news_to_ingest(raw, {"name": "t", "category": "media"})
+    assert len(items) == 1
+    it = items[0]
+    assert it["original_url"] == "https://ex.com/a"           # tracking stripped
+    assert it["title"] == "Hello"
+    assert it["body"] == "Full article body text here."        # content preferred
+    assert it["media_url"] == "https://ex.com/i.jpg"
+    assert it["media_type"] == "image"
+    assert it["posted_at"] == "2026-06-29T07:00:00+00:00"      # UTC
 
 
-def test_topic_classification():
-    assert enrich.classify_topic("Aramco raised oil output and barrel prices", "Oil") == "Energy"
-    assert enrich.classify_topic("NEOM announces Vision 2030 milestone", "NEOM") == "Vision 2030"
+def test_news_to_ingest_drops_empty_optionals():
+    raw = [{"url": "https://ex.com/b", "title": "T", "content": "Body"}]
+    it = pipeline.news_to_ingest(raw, {"name": "t"})[0]
+    assert "media_url" not in it and "media_type" not in it and "posted_at" not in it
+    assert it["original_url"] and it["body"] == "Body"
 
 
-def test_enrich_fills_fields():
-    item = normalize({"title": "Tadawul stocks rise", "url": "https://ex.com/x",
-                      "content": "The Saudi stock market Tadawul saw shares rise today."}, {"name": "t", "category": "financial"})
-    enrich.enrich(item, {"priority": 1})
-    assert item["language"] == "en"
-    assert item["keywords"]
-    assert item["category"] in ("Finance", "Economy")
-    assert 0 <= item["importance_score"] <= 100
-    assert item["summary"]
+def test_news_to_ingest_skips_urlless():
+    raw = [{"url": "", "title": "no url"}, {"url": "https://ex.com/c", "title": "ok", "content": "x"}]
+    items = pipeline.news_to_ingest(raw, {"name": "t"})
+    assert len(items) == 1 and items[0]["original_url"] == "https://ex.com/c"
 
 
-def test_db_insert_and_dedup():
-    tmp = Path(tempfile.mkdtemp()) / "t.db"
-    db.DB_PATH = tmp  # type: ignore
-    db.DATA_DIR = tmp.parent  # type: ignore
-    db.init_db()
-    conn = db.connect()
-    try:
-        item = normalize({"title": "X", "url": "https://ex.com/a", "content": "hello world"}, {"name": "s"})
-        item["hash"] = item["id"]
-        enrich.enrich(item)
-        assert db.insert_article(conn, item) is True
-        assert db.insert_article(conn, item) is False  # duplicate hash
-        conn.commit()
-        rows, total = db.list_articles(conn)
-        assert total == 1 and len(rows) == 1
-    finally:
-        conn.close()
+def test_social_to_ingest_shape():
+    posts = [{
+        "url": "https://x.com/h/status/123",
+        "text": "x" * 120,
+        "posted_at": "2026-06-29T10:00:00Z",
+        "image": "https://x.com/m.jpg",
+        "media_type": "image",
+        "engagement": {"likes": 12, "retweets": 3},
+    }]
+    it = pipeline.social_to_ingest(posts)[0]
+    assert it["original_url"] == "https://x.com/h/status/123"
+    assert len(it["title"]) == 80                              # title truncated
+    assert it["body"] == "x" * 120
+    assert it["raw_engagement"] == {"likes": 12, "retweets": 3}
+
+
+def test_ingest_client_batches(monkeypatch=None):
+    # Stub the per-batch POST and confirm chunking + aggregation (no network).
+    calls = []
+
+    def fake_post_batch(endpoint, headers, channel_id, items):
+        calls.append(len(items))
+        return {"found": len(items), "new": len(items), "skipped": 0}
+
+    ingest_client._post_batch = fake_post_batch  # type: ignore
+    ingest_client._endpoint = lambda: "http://x"  # type: ignore
+    ingest_client._headers = lambda: {}           # type: ignore
+
+    items = [{"original_url": f"https://e/{i}"} for i in range(60)]
+    totals = ingest_client.post_items("chan-uuid", items)
+    assert calls == [25, 25, 10]                   # MAX_BATCH chunking
+    assert totals == {"found": 60, "new": 60, "skipped": 0}
 
 
 def _run():

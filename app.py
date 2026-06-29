@@ -1,85 +1,92 @@
 #!/usr/bin/env python3
-"""Rawi Press — Saudi News Intelligence Platform (CLI).
+"""Rawi Press — Saudi Collector (CLI).
+
+Push-only collector: fetches articles + X posts from inside KSA and POSTs the
+raw items to the cloud `ingest` edge function. It does NOT store, summarize,
+dedup, or render — the cloud pipeline does all of that.
 
 Commands:
-  python app.py collect             Collect every enabled source -> SQLite
-  python app.py source <name>       Collect a single source
-  python app.py status              Storage + source health summary
-  python app.py list                List configured sources
-  python app.py serve [host] [port] Run the dashboard + REST API (default 127.0.0.1:8787)
-  python app.py initdb              Create the SQLite schema
-  python app.py migrate [path]      Import a legacy data/raw_articles.json into SQLite
+  python app.py collect             Collect news + social once, POST to ingest
+  python app.py news                Collect news sources only
+  python app.py social              Collect X/social channels only
+  python app.py source <name>       Collect a single source/channel by name
+  python app.py dry-run [name]      Map items to IngestItems and print JSON, no POST
+  python app.py list                List configured sources + channels
+  python app.py schedule [min]      Foreground auto-collector (default 15 min)
 
-Pipeline: collect -> normalize -> enrich (intelligence) -> dedup-store (SQLite)
-          -> per-source logs + health + daily stats.
+Secrets come from a gitignored .env (see .env.example).
 """
 from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 
-from core import db, pipeline
+from core import pipeline
 from utils.logger import get_logger
 
-ROOT = Path(__file__).resolve().parent
 log = get_logger("rawipress")
+
+
+def _known_names() -> list[str]:
+    return ([s["name"] for s in pipeline.load_sources()]
+            + [s["name"] for s in pipeline.load_social()])
 
 
 def cmd_collect() -> None:
     pipeline.run_collection()
 
 
+def cmd_news() -> None:
+    pipeline.run_collection(include_social=False)
+
+
+def cmd_social() -> None:
+    social_names = [s["name"] for s in pipeline.load_social()]
+    if not social_names:
+        log.info("no social channels configured")
+        return
+    pipeline.run_collection(source_names=social_names)
+
+
 def cmd_source(name: str) -> None:
-    names = [s["name"] for s in pipeline.load_sources()]
-    if name not in names:
-        log.error("source '%s' not found. Known: %s", name, ", ".join(names))
+    if name not in _known_names():
+        log.error("source '%s' not found. Known: %s", name, ", ".join(_known_names()))
         sys.exit(1)
     pipeline.run_collection([name])
 
 
-def cmd_status() -> None:
-    db.init_db()
-    conn = db.connect()
-    try:
-        stats = db.dashboard_stats(conn)
-        sources = db.list_sources(conn)
-    finally:
-        conn.close()
-    print("Rawi Press — status")
-    print(f"  total articles : {stats['total_articles']}")
-    print(f"  articles today : {stats['articles_today']}")
-    print(f"  success rate   : {stats['success_rate']}%")
-    print("  by source:")
-    for name, count in stats["by_source"].items():
-        print(f"    {name:<16} {count}")
-    print("  by category:")
-    for name, count in list(stats["by_category"].items())[:12]:
-        print(f"    {name:<16} {count}")
-    print("  source health:")
-    for s in sources:
-        print(f"    {s['name']:<16} {s.get('last_status') or 'idle':<6} "
-              f"ok={s['success_count']} fail={s['failure_count']} total={s['total_collected']}")
+def cmd_dry_run(name: str | None) -> None:
+    names = [name] if name else None
+    if name and name not in _known_names():
+        log.error("source '%s' not found. Known: %s", name, ", ".join(_known_names()))
+        sys.exit(1)
+    result = pipeline.run_collection(names, dry_run=True)
+    out = []
+    for r in result["results"]:
+        for item in r.get("items", []):
+            out.append(item)
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    print(f"\n# {len(out)} IngestItems mapped (NOT posted)", file=sys.stderr)
+    missing = [it["original_url"] for it in out if not it.get("body")]
+    if missing:
+        print(f"# WARNING: {len(missing)} item(s) have empty body", file=sys.stderr)
 
 
 def cmd_list() -> None:
+    print("news:")
     for s in pipeline.load_sources():
         flag = "on " if s.get("enabled", True) else "off"
-        verified = "✓" if s.get("verified") else " "
-        print(f"  [{flag}] {verified} {s['name']:<16} {s['collection_method']:<8} "
-              f"p{s.get('priority','?')}  {s.get('category','')}")
-
-
-def cmd_serve(host: str = "127.0.0.1", port: int = 8787) -> None:
-    import uvicorn
-    db.init_db()
-    log.info("dashboard on http://%s:%s", host, port)
-    uvicorn.run("web.server:app", host=host, port=port, log_level="info")
+        cid = "✓" if (s.get("channel_id") or "").strip() not in pipeline._PLACEHOLDERS else "✗"
+        print(f"  [{flag}] chan:{cid} {s['name']:<16} {s.get('collection_method','?'):<8} {s.get('category','')}")
+    print("social:")
+    for s in pipeline.load_social():
+        flag = "on " if s.get("enabled", True) else "off"
+        cid = "✓" if (s.get("channel_id") or "").strip() not in pipeline._PLACEHOLDERS else "✗"
+        print(f"  [{flag}] chan:{cid} {s['name']:<16} {s.get('platform','x'):<8} @{s.get('handle','')}")
 
 
 def cmd_schedule(minutes: int = 15) -> None:
-    """Dependency-free foreground scheduler (alternative to launchd).
-    Runs a collection now, then every <minutes>. Ctrl-C to stop."""
+    """Dependency-free foreground scheduler (alternative to launchd)."""
     import time
     log.info("scheduler started — collecting every %d min (Ctrl-C to stop)", minutes)
     while True:
@@ -90,17 +97,8 @@ def cmd_schedule(minutes: int = 15) -> None:
         time.sleep(max(1, minutes) * 60)
 
 
-def cmd_initdb() -> None:
-    db.init_db()
-    print(f"schema ready at {db.DB_PATH}")
-
-
-def cmd_migrate(path: str | None = None) -> None:
-    n = pipeline.migrate_json(path)
-    print(f"migrated {n} legacy articles into {db.DB_PATH}")
-
-
-USAGE = "usage: python app.py {collect | source <name> | status | list | serve [host] [port] | schedule [min] | initdb | migrate [path]}"
+USAGE = ("usage: python app.py "
+         "{collect | news | social | source <name> | dry-run [name] | list | schedule [min]}")
 
 
 def main(argv: list[str]) -> None:
@@ -109,24 +107,20 @@ def main(argv: list[str]) -> None:
     cmd = argv[0]
     if cmd == "collect":
         cmd_collect()
+    elif cmd == "news":
+        cmd_news()
+    elif cmd == "social":
+        cmd_social()
     elif cmd == "source":
         if len(argv) < 2:
             print("usage: python app.py source <name>"); sys.exit(1)
         cmd_source(argv[1])
-    elif cmd == "status":
-        cmd_status()
+    elif cmd == "dry-run":
+        cmd_dry_run(argv[1] if len(argv) > 1 else None)
     elif cmd == "list":
         cmd_list()
-    elif cmd == "serve":
-        host = argv[1] if len(argv) > 1 else "127.0.0.1"
-        port = int(argv[2]) if len(argv) > 2 else 8787
-        cmd_serve(host, port)
     elif cmd == "schedule":
         cmd_schedule(int(argv[1]) if len(argv) > 1 else 15)
-    elif cmd == "initdb":
-        cmd_initdb()
-    elif cmd == "migrate":
-        cmd_migrate(argv[1] if len(argv) > 1 else None)
     else:
         print(USAGE); sys.exit(1)
 

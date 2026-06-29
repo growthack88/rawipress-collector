@@ -103,9 +103,21 @@ def extract_article(url: str) -> dict:
     if not author and isinstance(ld.get("author"), dict):
         author = ld["author"].get("name", "")
 
+    image = _meta(soup, [("meta", {"property": "og:image"}), ("meta", {"name": "twitter:image"})])
+    if not image:
+        ld_img = ld.get("image")
+        if isinstance(ld_img, str):
+            image = ld_img
+        elif isinstance(ld_img, dict):
+            image = ld_img.get("url", "")
+        elif isinstance(ld_img, list) and ld_img:
+            first = ld_img[0]
+            image = first.get("url", "") if isinstance(first, dict) else str(first)
+
     return {
         "title": title,
         "content": content,
         "published_at": published,
         "author": author,
+        "image": image,
     }

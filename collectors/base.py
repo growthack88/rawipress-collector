@@ -1,10 +1,11 @@
 """Base collector contract.
 
 Every collector implements collect() and returns a list of RAW dicts:
-[{"source","title","url","published_at","content","summary","tags","author"}, ...]
+[{"source","title","url","published_at","content","summary","tags","author","image"}, ...]
 
-Normalization (utils.parser.normalize) and enrichment (core.enrich) happen
-downstream in the pipeline, so collectors only do extraction.
+Normalization (utils.parser.normalize) and mapping to IngestItems happen
+downstream in core.pipeline, so collectors only do extraction. The cloud
+ingest pipeline does dedup/summary/entities — never here.
 """
 from __future__ import annotations
 

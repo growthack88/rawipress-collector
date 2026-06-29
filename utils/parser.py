@@ -16,6 +16,7 @@ Canonical item:
 }
 """
 import hashlib
+import html
 import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
@@ -50,28 +51,35 @@ def canonical_url(url: str) -> str:
 def clean_text(value: str) -> str:
     if not value:
         return ""
-    # strip tags if any slipped through, collapse whitespace
+    # strip tags if any slipped through, decode entities, collapse whitespace
     value = re.sub(r"<[^>]+>", " ", value)
+    value = html.unescape(value)
     return _WS_RE.sub(" ", value).strip()
 
 
 def to_iso(value) -> str:
-    """Accept datetime, time.struct_time, or string; return ISO-8601 UTC or ''."""
+    """Accept datetime, time.struct_time, or string; return ISO-8601 UTC or ''.
+
+    The ingest contract requires posted_at in ISO-8601 UTC; if a string date
+    can't be parsed we return '' so the caller omits it (cloud defaults to now).
+    """
     if not value:
         return ""
     if isinstance(value, datetime):
         dt = value
-    else:
+    elif hasattr(value, "tm_year"):
         # feedparser exposes time.struct_time (e.g. entry.published_parsed)
-        try:
-            import time
+        import time
 
-            if hasattr(value, "tm_year"):
-                dt = datetime.fromtimestamp(time.mktime(value), tz=timezone.utc)
-            else:
-                return str(value).strip()
+        dt = datetime.fromtimestamp(time.mktime(value), tz=timezone.utc)
+    else:
+        # String date (article meta, JSON-LD, X created_at). Parse to UTC.
+        try:
+            from dateutil import parser as _dtp
+
+            dt = _dtp.parse(str(value))
         except Exception:
-            return str(value).strip()
+            return ""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
@@ -102,5 +110,6 @@ def normalize(raw: dict, source: dict) -> dict:
         "summary": clean_text(raw.get("summary", "")),
         "tags": raw.get("tags", []) or [],
         "author": clean_text(raw.get("author", "")),
+        "image": (raw.get("image", "") or "").strip(),
         "collected_at": now_iso(),
     }

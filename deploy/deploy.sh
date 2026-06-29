@@ -41,15 +41,19 @@ rsync -az --human-readable \
     "$LOCAL_DIR"/ "$HOST:$REMOTE_DIR/"
 
 # 3. Remote smoke test using the node's venv (falls back to python3).
-echo "==> Remote smoke test (collect + status)..."
+#    dry-run (no POST) so deploys never push partial/test data — proves the
+#    config loads and fetch+map works inside KSA. Run `app.py collect` manually
+#    (or let launchd do it) once you're happy.
+echo "==> Remote smoke test (list + dry-run, no POST)..."
 ssh "$HOST" "bash -lc '
     set -e
     cd ~/$REMOTE_DIR
-    PY=\$([ -x projects/venv/bin/python ] && echo projects/venv/bin/python || echo python3)
+    PY=\$([ -x projects/venv/bin/python ] && echo projects/venv/bin/python || \
+          { [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3; })
     echo \"using \$PY\"
-    \$PY app.py collect
+    \$PY app.py list
     echo
-    \$PY app.py status
+    \$PY app.py dry-run arabnews >/dev/null && echo \"dry-run OK\"
 '"
 
 echo

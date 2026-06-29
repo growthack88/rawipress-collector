@@ -51,6 +51,16 @@ class RSSCollector(BaseCollector):
                 content = entry["content"][0].get("value", "")
             content = content or entry.get("summary", "") or entry.get("description", "")
             tags = [t.get("term") for t in entry.get("tags", []) if t.get("term")]
+            image = ""
+            if entry.get("media_content"):
+                image = entry["media_content"][0].get("url", "")
+            if not image and entry.get("media_thumbnail"):
+                image = entry["media_thumbnail"][0].get("url", "")
+            if not image:
+                for enc in entry.get("links", []):
+                    if enc.get("rel") == "enclosure" and "image" in (enc.get("type") or ""):
+                        image = enc.get("href", "")
+                        break
             items.append({
                 "source": self.name,
                 "title": entry.get("title", ""),
@@ -60,7 +70,36 @@ class RSSCollector(BaseCollector):
                 "summary": entry.get("summary", ""),
                 "tags": tags,
                 "author": entry.get("author", ""),
+                "image": image,
             })
+        return items
+
+    def _fetch_full_bodies(self, items: list[dict]) -> list[dict]:
+        """Follow each entry's link and replace the snippet with the full article
+        body (RSS often gives only a summary; AI summary quality wants full text).
+        Bounded by full_content_max; falls back to the RSS snippet on failure."""
+        from collectors.article import extract_article
+
+        limit = int(self.source.get("full_content_max", 25))
+        enriched = 0
+        for item in items[:limit]:
+            url = item.get("url")
+            if not url:
+                continue
+            try:
+                art = extract_article(url)
+            except Exception as exc:
+                self.log.warning("full-content fetch failed %s: %s", url, exc)
+                continue
+            if art.get("content") and len(art["content"]) > len(item.get("content", "")):
+                item["content"] = art["content"]
+                enriched += 1
+            item["image"] = item.get("image") or art.get("image", "")
+            if art.get("published_at"):
+                item["published_at"] = item.get("published_at") or art["published_at"]
+            if art.get("author"):
+                item["author"] = item.get("author") or art["author"]
+        self.log.info("full-content: enriched %d/%d entries", enriched, min(len(items), limit))
         return items
 
     def collect(self) -> list[dict]:
@@ -80,6 +119,8 @@ class RSSCollector(BaseCollector):
             if parsed.entries:
                 items = self._entries_to_items(parsed)
                 self.log.info("parsed %d entries from %s", len(items), feed_url)
+                if self.source.get("fetch_full_content"):
+                    items = self._fetch_full_bodies(items)
                 return items
             self.log.warning("no entries from %s (bozo=%s)", feed_url, parsed.get("bozo"))
 
